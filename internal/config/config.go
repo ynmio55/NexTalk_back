@@ -9,6 +9,7 @@ type Config struct {
 	DatabaseURL string
 	JWTSecret   string
 	CORSOrigin  string
+	InviteCode  string
 }
 
 func Load() Config {
@@ -17,6 +18,7 @@ func Load() Config {
 		DatabaseURL: env("DATABASE_URL", ""),
 		JWTSecret:   env("JWT_SECRET", "dev-only-change-me"),
 		CORSOrigin:  env("CORS_ORIGIN", "http://localhost:5173"),
+		InviteCode:  env("INVITE_CODE", ""),
 	}
 }
 
