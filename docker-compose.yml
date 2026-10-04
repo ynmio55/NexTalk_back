@@ -1,0 +1,55 @@
+services:
+  postgres:
+    image: postgres:16-alpine
+    restart: unless-stopped
+    environment:
+      POSTGRES_DB: NexTalk
+      POSTGRES_USER: nextalk_app
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD}
+    volumes:
+      - nextalk_db:/var/lib/postgresql/data
+      - ./migrations:/docker-entrypoint-initdb.d:ro
+
+  api:
+    build: .
+    restart: unless-stopped
+    depends_on:
+      - postgres
+    environment:
+      APP_ADDR: :8080
+      DATABASE_URL: postgres://nextalk_app:${POSTGRES_PASSWORD}@postgres:5432/NexTalk?sslmode=disable
+      JWT_SECRET: ${JWT_SECRET}
+      CORS_ORIGIN: ${CORS_ORIGIN}
+      INVITE_CODE: ${INVITE_CODE}
+    ports:
+      - "127.0.0.1:8080:8080"
+
+  web:
+    build:
+      context: https://github.com/ynmio55/NexTalk_front.git#main
+      args:
+        VITE_API_URL: ${PUBLIC_API_URL}
+        VITE_TURN_URL: ${TURN_URL}
+        VITE_TURN_USERNAME: ${TURN_USERNAME}
+        VITE_TURN_CREDENTIAL: ${TURN_PASSWORD}
+    restart: unless-stopped
+    ports:
+      - "127.0.0.1:3000:80"
+
+  coturn:
+    image: coturn/coturn:4.6.3
+    restart: unless-stopped
+    network_mode: host
+    command:
+      - -n
+      - --log-file=stdout
+      - --lt-cred-mech
+      - --realm=${TURN_REALM}
+      - --user=${TURN_USERNAME}:${TURN_PASSWORD}
+      - --external-ip=${TURN_PUBLIC_IP}
+      - --listening-port=3478
+      - --min-port=49160
+      - --max-port=49200
+
+volumes:
+  nextalk_db:
