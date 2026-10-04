@@ -6,7 +6,6 @@ import (
 	"log"
 	"net/http"
 	"strings"
-	"time"
 
 	"github.com/google/uuid"
 	"github.com/gorilla/websocket"
@@ -20,6 +19,7 @@ type app struct {
 	db       *pgxpool.Pool
 	cfg      config.Config
 	upgrader websocket.Upgrader
+	hub      *hub
 }
 
 type authRequest struct {
@@ -35,6 +35,9 @@ type authResponse struct {
 
 func main() {
 	cfg := config.Load()
+	if len(cfg.JWTSecret) < 32 || cfg.JWTSecret == "dev-only-change-me" {
+		log.Fatal("JWT_SECRET must be at least 32 characters and must not use the development default")
+	}
 	if cfg.DatabaseURL == "" {
 		log.Fatal("DATABASE_URL is required")
 	}
@@ -50,21 +53,16 @@ func main() {
 		log.Fatal(err)
 	}
 
-	a := &app{
-		db: db,
-		cfg: cfg,
-		upgrader: websocket.Upgrader{
-			CheckOrigin: func(r *http.Request) bool {
-				return true
-			},
-		},
-	}
+	a := &app{db: db, cfg: cfg, hub: newHub()}
+	a.upgrader = websocket.Upgrader{CheckOrigin: a.originAllowed}
 
 	mux := http.NewServeMux()
 	mux.HandleFunc("GET /health", a.health)
 	mux.HandleFunc("POST /api/auth/register", a.register)
 	mux.HandleFunc("POST /api/auth/login", a.login)
 	mux.HandleFunc("GET /api/me", a.requireAuth(a.me))
+	mux.HandleFunc("GET /api/state", a.requireAuth(a.state))
+	mux.HandleFunc("GET /api/channels/{id}/messages", a.requireAuth(a.channelMessages))
 	mux.HandleFunc("GET /ws", a.ws)
 
 	log.Printf("NexTalk API listening on %s", cfg.Addr)
@@ -109,6 +107,10 @@ func (a *app) register(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	if err := a.ensureDefaultWorkspace(r.Context(), id); err != nil {
+		log.Printf("workspace bootstrap: %v", err)
+	}
+
 	token, _ := auth.Sign(a.cfg.JWTSecret, id, in.Username)
 	writeJSON(w, http.StatusCreated, authResponse{
 		Token: token,
@@ -131,6 +133,10 @@ func (a *app) login(w http.ResponseWriter, r *http.Request) {
 	if err != nil || auth.CheckPassword(hash, in.Password) != nil {
 		writeJSON(w, http.StatusUnauthorized, map[string]string{"error": "invalid credentials"})
 		return
+	}
+
+	if err := a.ensureDefaultWorkspace(r.Context(), id); err != nil {
+		log.Printf("workspace bootstrap: %v", err)
 	}
 
 	token, _ := auth.Sign(a.cfg.JWTSecret, id, username)
@@ -156,37 +162,6 @@ func (a *app) me(w http.ResponseWriter, r *http.Request, claims *auth.Claims) {
 	})
 }
 
-func (a *app) ws(w http.ResponseWriter, r *http.Request) {
-	token := r.URL.Query().Get("token")
-	claims, err := auth.Parse(a.cfg.JWTSecret, token)
-	if err != nil {
-		http.Error(w, "unauthorized", http.StatusUnauthorized)
-		return
-	}
-	conn, err := a.upgrader.Upgrade(w, r, nil)
-	if err != nil {
-		return
-	}
-	defer conn.Close()
-
-	_ = conn.WriteJSON(map[string]any{
-		"type": "ready",
-		"user": map[string]string{"id": claims.UserID, "username": claims.Username},
-	})
-
-	for {
-		var msg map[string]any
-		if err := conn.ReadJSON(&msg); err != nil {
-			return
-		}
-		msg["from"] = claims.UserID
-		msg["sent_at"] = time.Now().UTC()
-		if err := conn.WriteJSON(msg); err != nil {
-			return
-		}
-	}
-}
-
 func (a *app) requireAuth(next func(http.ResponseWriter, *http.Request, *auth.Claims)) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
 		header := r.Header.Get("Authorization")
@@ -205,7 +180,11 @@ func (a *app) requireAuth(next func(http.ResponseWriter, *http.Request, *auth.Cl
 
 func (a *app) cors(next http.Handler) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		w.Header().Set("Access-Control-Allow-Origin", a.cfg.CORSOrigin)
+		origin := r.Header.Get("Origin")
+		if origin != "" && a.originAllowed(r) {
+			w.Header().Set("Access-Control-Allow-Origin", origin)
+			w.Header().Set("Vary", "Origin")
+		}
 		w.Header().Set("Access-Control-Allow-Headers", "Content-Type, Authorization")
 		w.Header().Set("Access-Control-Allow-Methods", "GET, POST, PUT, PATCH, DELETE, OPTIONS")
 		if r.Method == http.MethodOptions {
