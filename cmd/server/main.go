@@ -26,6 +26,7 @@ type authRequest struct {
 	Username    string `json:"username"`
 	DisplayName string `json:"display_name"`
 	Password    string `json:"password"`
+	InviteCode  string `json:"invite_code"`
 }
 
 type authResponse struct {
@@ -83,6 +84,10 @@ func (a *app) register(w http.ResponseWriter, r *http.Request) {
 	}
 	in.Username = strings.TrimSpace(strings.ToLower(in.Username))
 	in.DisplayName = strings.TrimSpace(in.DisplayName)
+	if a.cfg.InviteCode != "" && in.InviteCode != a.cfg.InviteCode {
+		writeJSON(w, http.StatusForbidden, map[string]string{"error": "invalid invite code"})
+		return
+	}
 	if len(in.Username) < 3 || len(in.Password) < 8 {
 		writeJSON(w, http.StatusBadRequest, map[string]string{"error": "username must be 3+ chars and password 8+ chars"})
 		return
